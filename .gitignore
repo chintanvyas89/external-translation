@@ -1,0 +1,20 @@
+# Composer-managed dependencies - reinstallable from composer.lock.
+/vendor/
+
+# User-uploaded files from local testing - not source code.
+/web/sites/default/files/
+
+# ddev-generated local-only settings (DB creds only valid inside the ddev
+# Docker network, plus a dev-only hash_salt) - regenerated automatically by
+# `ddev start`/`ddev restart`, excluded since this repo is public.
+/web/sites/default/settings.ddev.php
+
+# Local overrides, never meant to be shared.
+/web/sites/default/settings.local.php
+
+*.sql
+*.sql.gz
+.DS_Store
+
+# Claude Code runtime session state - not project source.
+/.claude/

@@ -1,0 +1,35 @@
+tmgmt_external_translation.proposal_review:
+  path: '/translation-proposals/{entity_type}/{entity_id}/{langcode}'
+  defaults:
+    _form: '\Drupal\tmgmt_external_translation\Form\TranslationProposalReviewForm'
+    _title: 'Translation proposals'
+  requirements:
+    _permission: 'accept translation proposals+reject translation proposals'
+  options:
+    parameters:
+      entity_type:
+        type: string
+      entity_id:
+        type: string
+      langcode:
+        type: string
+
+tmgmt_external_translation.proposal_dashboard:
+  path: '/admin/content/translation-proposals'
+  defaults:
+    _form: '\Drupal\tmgmt_external_translation\Form\ProposalDashboardForm'
+    _title: 'Translation proposals'
+  requirements:
+    _permission: 'accept translation proposals+reject translation proposals'
+
+tmgmt_external_translation.node_translation_status:
+  path: '/node/{node}/translation-status'
+  defaults:
+    _form: '\Drupal\tmgmt_external_translation\Form\EntityTranslationStatusForm'
+    _title: 'Translation status'
+  requirements:
+    _permission: 'view translation audit'
+  options:
+    parameters:
+      node:
+        type: entity:node

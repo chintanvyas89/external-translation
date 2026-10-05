@@ -1,0 +1,23 @@
+langcode: en
+status: true
+dependencies:
+  enforced:
+    module:
+      - tmgmt_demo
+  config:
+    - field.storage.node.tmgmt_body
+    - node.type.translatable_node
+  module:
+    - text
+id: node.translatable_node.tmgmt_body
+field_name: tmgmt_body
+entity_type: node
+bundle: translatable_node
+label: 'Demo body'
+description: ''
+required: false
+translatable: true
+default_value: {  }
+default_value_callback: ''
+settings: {  }
+field_type: text_long

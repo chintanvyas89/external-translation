@@ -1,0 +1,60 @@
+services:
+  tmgmt_external_translation.mock_client:
+    class: Drupal\tmgmt_external_translation\Client\MockTranslationApiClient
+    arguments: ['@state']
+
+  # Alias: swap the class here (or override in settings.php) to point at a
+  # real HttpTranslationApiClient once a real vendor is chosen. Everything
+  # else in the module depends only on TranslationApiClientInterface.
+  tmgmt_external_translation.translation_api_client:
+    alias: tmgmt_external_translation.mock_client
+
+  tmgmt_external_translation.hash_manager:
+    class: Drupal\tmgmt_external_translation\Translation\TranslationHashManager
+
+  tmgmt_external_translation.provenance_manager:
+    class: Drupal\tmgmt_external_translation\Translation\TranslationProvenanceManager
+    arguments: ['@database', '@tmgmt_external_translation.hash_manager', '@datetime.time']
+
+  tmgmt_external_translation.field_value_reader:
+    class: Drupal\tmgmt_external_translation\Translation\TranslationFieldValueReader
+    arguments: ['@entity_type.manager']
+
+  tmgmt_external_translation.conflict_detector:
+    class: Drupal\tmgmt_external_translation\Translation\TranslationConflictDetector
+    arguments: ['@tmgmt_external_translation.field_value_reader', '@tmgmt_external_translation.hash_manager', '@tmgmt_external_translation.provenance_manager']
+
+  tmgmt_external_translation.moderation_gate:
+    class: Drupal\tmgmt_external_translation\Translation\ModerationGate
+    arguments: ['@module_handler', '@config.factory', '@?content_moderation.moderation_information']
+
+  tmgmt_external_translation.entity_writer:
+    class: Drupal\tmgmt_external_translation\Translation\TranslationEntityWriter
+    arguments: ['@entity_type.manager', '@tmgmt_external_translation.moderation_gate']
+
+  tmgmt_external_translation.proposal_manager:
+    class: Drupal\tmgmt_external_translation\Translation\TranslationProposalManager
+    arguments: ['@database', '@tmgmt_external_translation.hash_manager', '@tmgmt_external_translation.provenance_manager', '@entity_type.manager', '@datetime.time', '@current_user', '@tmgmt_external_translation.field_value_reader', '@event_dispatcher', '@tmgmt_external_translation.moderation_gate']
+
+  tmgmt_external_translation.request_helper:
+    class: Drupal\tmgmt_external_translation\Translation\TranslationRequestHelper
+    arguments: ['@entity_type.manager', '@tmgmt_external_translation.polling_service']
+
+  tmgmt_external_translation.job_item_batch_completer:
+    class: Drupal\tmgmt_external_translation\Translation\JobItemBatchCompleter
+    arguments: ['@entity_type.manager', '@tmgmt_external_translation.conflict_detector', '@tmgmt_external_translation.provenance_manager', '@tmgmt_external_translation.proposal_manager', '@tmgmt_external_translation.field_value_reader', '@event_dispatcher']
+
+  tmgmt_external_translation.polling_service:
+    class: Drupal\tmgmt_external_translation\Translation\TranslationPollingService
+    arguments: ['@database', '@tmgmt_external_translation.translation_api_client', '@event_dispatcher', '@datetime.time']
+
+  tmgmt_external_translation.complete_job_item_batch_subscriber:
+    class: Drupal\tmgmt_external_translation\EventSubscriber\CompleteJobItemBatchSubscriber
+    arguments: ['@tmgmt_external_translation.job_item_batch_completer']
+    tags:
+      - { name: event_subscriber }
+
+  tmgmt_external_translation.route_subscriber:
+    class: Drupal\tmgmt_external_translation\Routing\RouteSubscriber
+    tags:
+      - { name: event_subscriber }

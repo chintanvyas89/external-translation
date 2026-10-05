@@ -1,0 +1,5 @@
+proposal_dashboard:
+  version: 1.x
+  css:
+    theme:
+      css/proposal-dashboard.css: {}

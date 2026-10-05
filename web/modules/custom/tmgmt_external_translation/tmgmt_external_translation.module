@@ -1,0 +1,489 @@
+<?php
+
+/**
+ * @file
+ * Protects editor corrections: classifies every save of a translated value
+ * as either an editor correction or an implicit approval of the machine
+ * text, and detects when TMGMT has landed a fresh, not-yet-reviewed
+ * machine translation onto the entity.
+ */
+
+use Drupal\Core\Entity\ContentEntityInterface;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Url;
+use Drupal\Core\Utility\Error;
+use Drupal\tmgmt\JobItemInterface;
+use Drupal\tmgmt\TMGMTException;
+use Drupal\tmgmt_external_translation\Translation\TranslationFieldContext;
+use Drupal\tmgmt_external_translation\Translation\TranslationHashManagerInterface;
+use Drupal\tmgmt_external_translation\Translation\TranslationProvenanceManagerInterface;
+
+/**
+ * Implements hook_cron().
+ *
+ * Real-world entry point for checking on outstanding async translation
+ * requests - the same processAllPending() drush scripts call directly.
+ */
+function tmgmt_external_translation_cron() {
+  \Drupal::service('tmgmt_external_translation.polling_service')->processAllPending();
+}
+
+/**
+ * Implements hook_form_alter().
+ *
+ * Surfaces pending translation proposals directly on the normal Drupal
+ * edit form (spec section 24: "New machine translation available -
+ * [View proposal]") rather than requiring a separate translation editor.
+ */
+function tmgmt_external_translation_form_alter(array &$form, FormStateInterface $form_state, $form_id) {
+  $form_object = $form_state->getFormObject();
+  if (!$form_object instanceof \Drupal\Core\Entity\ContentEntityFormInterface) {
+    return;
+  }
+  $entity = $form_object->getEntity();
+  if (!$entity instanceof ContentEntityInterface || $entity->isNew() || $entity->isDefaultTranslation()) {
+    return;
+  }
+
+  _tmgmt_external_translation_form_alter_add_request_mt($form, $entity);
+
+  if (!\Drupal::currentUser()->hasPermission('accept translation proposals') && !\Drupal::currentUser()->hasPermission('reject translation proposals')) {
+    return;
+  }
+
+  /** @var \Drupal\tmgmt_external_translation\Translation\TranslationProposalManagerInterface $proposalManager */
+  $proposalManager = \Drupal::service('tmgmt_external_translation.proposal_manager');
+  $pending = $proposalManager->getPendingProposalsForEntity($entity->getEntityTypeId(), (string) $entity->id(), $entity->language()->getId());
+  if (!$pending) {
+    return;
+  }
+
+  $url = Url::fromRoute('tmgmt_external_translation.proposal_review', [
+    'entity_type' => $entity->getEntityTypeId(),
+    'entity_id' => $entity->id(),
+    'langcode' => $entity->language()->getId(),
+  ]);
+  $form['tmgmt_external_translation_proposal_notice'] = [
+    '#type' => 'container',
+    '#weight' => -100,
+    '#attributes' => ['class' => ['messages', 'messages--warning']],
+    'message' => [
+      '#markup' => \Drupal::translation()->formatPlural(
+        count($pending),
+        'A new machine translation is available for review. <a href=":url">View proposal</a>',
+        '@count new machine translations are available for review. <a href=":url">View proposals</a>',
+        [':url' => $url->toString()]
+      ),
+    ],
+  ];
+}
+
+/**
+ * Implements hook_form_alter() (continued).
+ *
+ * Adds an opt-in "Also request machine translation" checkbox to the
+ * standard "Add translation" form for any translatable content entity
+ * (mirrors layout_builder_at's "Copy blocks into translation" checkbox and
+ * its visibility rule). When checked, machine translation is requested
+ * AFTER the entity's own save completes - via a submit handler appended to
+ * the Save action, not a hook_entity_insert/update - so it runs as a
+ * separate, later step rather than nesting another entity save inside an
+ * in-progress one.
+ */
+function _tmgmt_external_translation_form_alter_add_request_mt(array &$form, ContentEntityInterface $entity): void {
+  // Caller already confirmed $entity is a non-default, saved translation;
+  // this narrows further to only a BRAND NEW translation (not a later edit
+  // of one already added).
+  if (!$entity->isNewTranslation()) {
+    return;
+  }
+  if (!\Drupal::currentUser()->hasPermission('manage translation providers')) {
+    return;
+  }
+  if (!\Drupal::entityTypeManager()->getStorage('tmgmt_translator')->load('external_api')) {
+    // No usable translator: don't offer a control that can only no-op.
+    // Full applicability is re-checked (non-fatally) in the submit handler.
+    return;
+  }
+  if (!isset($form['actions']['submit'])) {
+    return;
+  }
+
+  $form['tmgmt_external_translation_request_mt'] = [
+    '#type' => 'checkbox',
+    '#title' => t('Also request machine translation'),
+    '#description' => t('Automatically translate this content via the external translation provider immediately after saving.'),
+    '#weight' => -10,
+    '#default_value' => FALSE,
+  ];
+  $form['actions']['submit']['#submit'][] = '_tmgmt_external_translation_request_mt_submit';
+}
+
+/**
+ * Submit handler appended to the "Add translation" form's Save action.
+ * Runs after the entity form's own '::save' handler, so $entity is already
+ * persisted with all translations/hooks (including our own provenance
+ * classification, e.g. source_copy) fully committed.
+ */
+function _tmgmt_external_translation_request_mt_submit(array &$form, FormStateInterface $form_state): void {
+  if (!$form_state->getValue('tmgmt_external_translation_request_mt')) {
+    return;
+  }
+  $form_object = $form_state->getFormObject();
+  if (!$form_object instanceof \Drupal\Core\Entity\ContentEntityFormInterface) {
+    return;
+  }
+  $entity = $form_object->getEntity();
+  $targetLangcode = $entity->language()->getId();
+
+  // Reload fresh (::save already ran earlier in this same #submit array),
+  // but loadUnchanged() returns the entity's DEFAULT translation - fetch
+  // the specific translation we actually just added back out of it, or
+  // the language context above would be silently discarded.
+  $entity = \Drupal::entityTypeManager()->getStorage($entity->getEntityTypeId())->loadUnchanged($entity->id());
+  if (!$entity instanceof ContentEntityInterface || !$entity->hasTranslation($targetLangcode)) {
+    return;
+  }
+  $entity = $entity->getTranslation($targetLangcode);
+
+  $result = \Drupal::service('tmgmt_external_translation.request_helper')
+    ->requestMachineTranslationForNewTranslation($entity, $targetLangcode);
+
+  if ($result['success']) {
+    \Drupal::messenger()->addStatus($result['message']);
+  }
+  else {
+    \Drupal::messenger()->addWarning($result['message']);
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for tmgmt_content_translate_form.
+ *
+ * tmgmt_content's own "Request translation" form (embedded on
+ * /{entity}/translations) always redirects its submission through TMGMT's
+ * batch-progress page (/batch?id=X&op=start), even for jobs that don't
+ * need any manual checkout step at all - our single external_api
+ * translator has no checkout settings and quick_checkout is enabled, so
+ * every job we submit qualifies. That batch page needs JavaScript (or a
+ * <noscript> meta-refresh fallback) to actually finish and redirect back;
+ * confirmed via a direct HTTP submission that if that JS step doesn't run
+ * to completion, the user sees what looks like a bare page reload with no
+ * confirmation message, even though the job was often already submitted
+ * synchronously moments earlier. Swap the button's submit handler for our
+ * own, which calls JobCheckoutManager::checkoutMultiple() directly instead
+ * of checkoutAndRedirect() - skipping the redundant batch wrapper (and the
+ * double requestTranslation() call it triggers) for jobs that don't need
+ * checkout, while still deferring to the normal batch/checkout flow for
+ * any job that genuinely does.
+ */
+function tmgmt_external_translation_form_tmgmt_content_translate_form_alter(array &$form, FormStateInterface $form_state): void {
+  if (isset($form['actions']['request'])) {
+    $form['actions']['request']['#submit'] = ['_tmgmt_external_translation_content_translate_form_submit'];
+  }
+}
+
+/**
+ * Replacement submit handler for tmgmt_content_translate_form's "Request
+ * translation" button - see tmgmt_external_translation_form_tmgmt_content_translate_form_alter().
+ * Job-creation loop mirrors \Drupal\tmgmt_content\Form\ContentTranslateForm::submitForm()
+ * exactly (same per-language job + addItem + error handling); the only
+ * change is calling checkoutMultiple() directly afterward instead of
+ * checkoutAndRedirect(), so a job that doesn't need manual checkout is
+ * submitted and confirmed within this single request instead of via a
+ * batch-page redirect. The provider's own translation latency is
+ * unaffected either way: requestTranslation() only submits the async
+ * request (Part 4 of the plan) and returns immediately regardless of how
+ * long the provider actually takes to respond; completion always lands
+ * later via polling (cron or the "Refresh now" button), independent of
+ * this UI path.
+ */
+function _tmgmt_external_translation_content_translate_form_submit(array &$form, FormStateInterface $form_state): void {
+  /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
+  $entity = $form_state->get('entity');
+  $values = $form_state->getValues();
+  $jobs = [];
+  foreach (array_keys(array_filter($values['languages'])) as $langcode) {
+    $job = tmgmt_job_create($entity->language()->getId(), $langcode, \Drupal::currentUser()->id());
+    try {
+      $job->addItem('content', $entity->getEntityTypeId(), $entity->id());
+      $jobs[$job->id()] = $job;
+    }
+    catch (TMGMTException $e) {
+      Error::logException(\Drupal::logger('tmgmt'), $e);
+      $languages = \Drupal::languageManager()->getLanguages();
+      $target_lang_name = $languages[$langcode]->language;
+      \Drupal::messenger()->addError(t('Unable to add job item for target language %name. Make sure the source content is not empty.', ['%name' => $target_lang_name]));
+    }
+  }
+
+  if (!$jobs) {
+    return;
+  }
+
+  $checkoutManager = \Drupal::service('tmgmt.job_checkout_manager');
+  // Auto-submits (saves + requestTranslation(), which already surfaces its
+  // own status/error messages via tmgmt_write_request_messages()) every
+  // job that doesn't need manual checkout; returns only the ones that
+  // still do.
+  $needs_checkout = $checkoutManager->checkoutMultiple($jobs);
+  if ($needs_checkout) {
+    // Still genuinely needs a manual checkout step (e.g. a translator with
+    // configurable settings) - preserve TMGMT's own batch/redirect flow,
+    // but only for this subset.
+    $checkoutManager->checkoutAndRedirect($form_state, $needs_checkout);
+  }
+
+  if (array_diff_key($jobs, $needs_checkout)) {
+    // requestTranslation() above only submits the async request (Part 4)
+    // and returns immediately - poll right away so this still feels like
+    // a single, synchronous action for the editor, mirroring
+    // TranslationRequestHelper::requestMachineTranslationForNewTranslation()'s
+    // identical choice for the "Add translation" checkbox flow. The mock
+    // client's default ready_after_checks=1 means this completes (and any
+    // resulting proposal is created) right away; if the provider
+    // genuinely takes longer, completion still lands later via cron or
+    // "Refresh now", same as always - this poll is a UX nicety, not load-
+    // bearing for correctness.
+    \Drupal::service('tmgmt_external_translation.polling_service')->processAllPending();
+  }
+}
+
+/**
+ * Field type => the specific properties on it eligible for provenance
+ * tracking. Simple text types translate their single 'value' property;
+ * 'image' translates 'alt'/'title' (its own target_id/width/height stay
+ * untouched - those aren't translatable text). Deliberately narrow beyond
+ * this for the POC - other compound field types (link, etc.) are still
+ * out of scope.
+ */
+function tmgmt_external_translation_trackable_field_properties(): array {
+  return [
+    'string' => ['value'],
+    'string_long' => ['value'],
+    'text' => ['value'],
+    'text_long' => ['value'],
+    'text_with_summary' => ['value'],
+    'image' => ['alt', 'title'],
+  ];
+}
+
+/**
+ * Field types eligible for provenance tracking - the keys of
+ * tmgmt_external_translation_trackable_field_properties(), for callers
+ * that only need to test a field's type, not enumerate its properties.
+ */
+function tmgmt_external_translation_trackable_field_types(): array {
+  return array_keys(tmgmt_external_translation_trackable_field_properties());
+}
+
+/**
+ * Implements hook_entity_update().
+ *
+ * Core only fires a translation-specific hook (translation_insert /
+ * translation_delete) when a translation is added or removed entirely -
+ * normal edits to an existing translation's field values only trigger the
+ * generic entity-level update hook, with all translations present on the
+ * $entity object. So this single hook covers both "a fresh machine
+ * translation just landed" and "an editor just edited an existing one".
+ */
+function tmgmt_external_translation_entity_update(EntityInterface $entity) {
+  if ($entity instanceof JobItemInterface) {
+    _tmgmt_external_translation_handle_job_item_accepted($entity);
+    return;
+  }
+
+  _tmgmt_external_translation_classify_entity_translations($entity);
+}
+
+/**
+ * Implements hook_entity_insert().
+ *
+ * Needed for entities like the inline block_content copies
+ * layout_builder_at's "Copy blocks into translation" widget creates: those
+ * are brand-new entities (not translations added to an existing one), so
+ * they never go through hook_entity_update at all. Without this, such a
+ * translation would have no provenance record before its first machine
+ * translation request and would be misclassified as protected editor
+ * content by TranslationConflictDetector (see its !$record branch).
+ *
+ * No-op for the common case of a brand-new, single-language entity:
+ * getTranslationLanguages(FALSE) returns empty until a second language
+ * exists.
+ */
+function tmgmt_external_translation_entity_insert(EntityInterface $entity) {
+  _tmgmt_external_translation_classify_entity_translations($entity);
+}
+
+/**
+ * Classifies every non-default translation currently on the entity. Shared
+ * by hook_entity_insert (new translations created as brand-new entities,
+ * e.g. inline blocks) and hook_entity_update (translations added to /
+ * edited on an existing entity).
+ */
+function _tmgmt_external_translation_classify_entity_translations(EntityInterface $entity): void {
+  if (!$entity instanceof ContentEntityInterface || !$entity->getEntityType()->isTranslatable()) {
+    return;
+  }
+
+  foreach (array_keys($entity->getTranslationLanguages(FALSE)) as $langcode) {
+    _tmgmt_external_translation_classify_save($entity->getTranslation($langcode));
+  }
+}
+
+/**
+ * For every trackable translated field on the entity, compares the just
+ * saved value against the stored provenance baseline and reclassifies it
+ * as an editor modification / implicit approval / new baseline as needed.
+ *
+ * Comparing against current_target_hash (not provider_translation_hash)
+ * makes this idempotent against our own system writes: every provenance
+ * write path (recordMachineTranslation, setBaseline, recordEditorEdit)
+ * always updates current_target_hash to match exactly what it just wrote,
+ * so a save that merely persists what our own code already wrote is a
+ * no-op here. Only a save that changes the value relative to our last
+ * recorded baseline - i.e. a real edit made through the normal Drupal edit
+ * form - triggers reclassification.
+ */
+function _tmgmt_external_translation_classify_save(ContentEntityInterface $translation): void {
+  $entity_type = $translation->getEntityTypeId();
+
+  /** @var \Drupal\tmgmt_external_translation\Translation\TranslationProvenanceManagerInterface $provenanceManager */
+  $provenanceManager = \Drupal::service('tmgmt_external_translation.provenance_manager');
+  /** @var \Drupal\tmgmt_external_translation\Translation\TranslationHashManagerInterface $hashManager */
+  $hashManager = \Drupal::service('tmgmt_external_translation.hash_manager');
+  $trackableProperties = tmgmt_external_translation_trackable_field_properties();
+
+  foreach ($translation->getFieldDefinitions() as $fieldName => $definition) {
+    if (!$definition->isTranslatable() || !isset($trackableProperties[$definition->getType()])) {
+      continue;
+    }
+    $fieldItemList = $translation->get($fieldName);
+    foreach ($fieldItemList as $delta => $item) {
+      foreach ($trackableProperties[$definition->getType()] as $property) {
+        if (!$item->getFieldDefinition()->getFieldStorageDefinition()->getPropertyDefinition($property)) {
+          continue;
+        }
+        $value = $item->get($property)->getValue();
+        if (!is_scalar($value)) {
+          continue;
+        }
+        $context = new TranslationFieldContext(
+          $entity_type,
+          (string) $translation->id(),
+          $translation->getUntranslated()->language()->getId(),
+          $translation->language()->getId(),
+          $entity_type,
+          (string) $translation->id(),
+          $fieldName,
+          $delta,
+          $property,
+        );
+
+        $record = $provenanceManager->getRecord($context);
+        $newValue = (string) $value;
+
+        if (!$record) {
+          if (_tmgmt_external_translation_is_untouched_source_copy($translation, $fieldName, $delta, $property, $newValue, $hashManager)) {
+            // Byte-identical to the current source value: this is the
+            // untouched placeholder Drupal core seeds every new translation
+            // with (ContentTranslationController::prepareTranslation()), not
+            // genuine editor-authored content. Tracked distinctly so the
+            // first machine translation can write straight through instead
+            // of being misdiverted into a proposal - see
+            // TranslationConflictDetector::hasEditorModification().
+            $provenanceManager->recordEditorEdit($context, $newValue, TranslationProvenanceManagerInterface::ORIGIN_SOURCE_COPY, TranslationProvenanceManagerInterface::STATUS_COPIED_FROM_SOURCE);
+            continue;
+          }
+          // No MT history for this slot: purely editor-authored content.
+          // recordEditorEdit (not setBaseline) leaves provider_translation_hash
+          // empty since this was never machine-translated.
+          $provenanceManager->recordEditorEdit($context, $newValue, TranslationProvenanceManagerInterface::ORIGIN_EDITOR);
+          continue;
+        }
+
+        $newHash = $hashManager->hash($newValue);
+        if ($newHash === $record['current_target_hash']) {
+          // Unchanged relative to our last recorded baseline - either our own
+          // system write just landed, or the editor saved without editing.
+          continue;
+        }
+
+        if ($newHash === $record['provider_translation_hash']) {
+          $provenanceManager->recordEditorApproval($context, $newValue);
+        }
+        else {
+          $provenanceManager->recordEditorModification($context, $newValue);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Whether $newValue (the just-saved value of $translation's
+ * $fieldName.$delta.$property) is byte-identical to the CURRENT value of
+ * the same field/delta/property on the source (untranslated/default)
+ * entity - i.e. still exactly the copy-of-source placeholder core seeded
+ * this translation with, never touched.
+ */
+function _tmgmt_external_translation_is_untouched_source_copy(ContentEntityInterface $translation, string $fieldName, int $delta, string $property, string $newValue, TranslationHashManagerInterface $hashManager): bool {
+  $source = $translation->getUntranslated();
+  if (!$source->hasField($fieldName) || !isset($source->get($fieldName)[$delta])) {
+    return FALSE;
+  }
+  $sourceItem = $source->get($fieldName)[$delta];
+  if (!$sourceItem->getFieldDefinition()->getFieldStorageDefinition()->getPropertyDefinition($property)) {
+    return FALSE;
+  }
+  $sourceValue = $sourceItem->get($property)->getValue();
+  if (!is_scalar($sourceValue)) {
+    return FALSE;
+  }
+  return $hashManager->hash((string) $sourceValue) === $hashManager->hash($newValue);
+}
+
+/**
+ * When a TMGMT job item transitions to "accepted" (a human explicitly
+ * reviewed and accepted it in the TMGMT review UI), bump any of its
+ * still-"machine_translated" (not yet reviewed) provenance slots to
+ * "approved", provided nothing has changed the value in the meantime.
+ */
+function _tmgmt_external_translation_handle_job_item_accepted(JobItemInterface $entity): void {
+  if (!$entity->isAccepted()) {
+    return;
+  }
+  if (isset($entity->original) && $entity->original instanceof JobItemInterface && $entity->original->isAccepted()) {
+    // Already processed on a previous save.
+    return;
+  }
+
+  $job = $entity->getJob();
+  $entity_type = $entity->getItemType();
+  $entity_id = (string) $entity->getItemId();
+  $source_langcode = $job->getSourceLangcode();
+  $target_langcode = $job->getTargetLangcode();
+
+  /** @var \Drupal\tmgmt\Data $data_service */
+  $data_service = \Drupal::service('tmgmt.data');
+  /** @var \Drupal\tmgmt_external_translation\Translation\TranslationProvenanceManagerInterface $provenanceManager */
+  $provenanceManager = \Drupal::service('tmgmt_external_translation.provenance_manager');
+  /** @var \Drupal\tmgmt_external_translation\Translation\TranslationFieldValueReaderInterface $fieldValueReader */
+  $fieldValueReader = \Drupal::service('tmgmt_external_translation.field_value_reader');
+
+  $flattened = $data_service->filterTranslatable($entity->getData());
+  foreach (array_keys($flattened) as $key) {
+    $context = TranslationFieldContext::fromTmgmtKey($key, $entity_type, $entity_id, $source_langcode, $target_langcode, $entity_type, $entity_id);
+    $record = $provenanceManager->getRecord($context);
+    if ($record
+      && $record['status'] === TranslationProvenanceManagerInterface::STATUS_MACHINE_TRANSLATED
+      && $record['current_target_hash'] === $record['provider_translation_hash']
+    ) {
+      $currentValue = $fieldValueReader->getLiveValue($context);
+      if ($currentValue !== NULL) {
+        $provenanceManager->recordEditorApproval($context, $currentValue);
+      }
+    }
+  }
+}

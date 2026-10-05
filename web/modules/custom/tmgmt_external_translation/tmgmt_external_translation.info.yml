@@ -1,0 +1,9 @@
+name: 'TMGMT External Translation'
+type: module
+description: 'Integrates an external machine translation service with TMGMT while protecting editor corrections from being silently overwritten.'
+package: Translation
+core_version_requirement: ^10 || ^11
+dependencies:
+  - tmgmt:tmgmt
+  - tmgmt:tmgmt_content
+  - drupal:content_translation

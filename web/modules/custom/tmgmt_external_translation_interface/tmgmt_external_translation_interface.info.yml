@@ -1,0 +1,8 @@
+name: 'TMGMT External Translation: Interface'
+type: module
+description: 'Extends the external translation engine to cover Drupal interface strings (Locale), with the same editor-correction protection as content.'
+package: Translation
+core_version_requirement: ^10 || ^11
+dependencies:
+  - drupal:locale
+  - tmgmt_external_translation:tmgmt_external_translation

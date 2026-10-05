@@ -1,0 +1,348 @@
+<?php
+
+/**
+ * @file
+ * Install/schema hooks for the custom provenance/proposal storage.
+ *
+ * These tables are intentionally plain SQL tables, not entities: they hold
+ * bookkeeping metadata (hashes, origin, status) rather than user-facing
+ * content, so the overhead of the Entity API isn't warranted.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function tmgmt_external_translation_schema() {
+  $schema['translation_provenance'] = [
+    'description' => 'Tracks the origin and review status of one translated value slot (one field delta on one target entity translation) so editor corrections are never silently overwritten by machine retranslation.',
+    'fields' => [
+      'id' => [
+        'type' => 'serial',
+        'not null' => TRUE,
+        'description' => 'Primary key.',
+      ],
+      'source_entity_type' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+      ],
+      'source_entity_id' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+      ],
+      'source_langcode' => [
+        'type' => 'varchar_ascii',
+        'length' => 12,
+        'not null' => TRUE,
+      ],
+      'target_langcode' => [
+        'type' => 'varchar_ascii',
+        'length' => 12,
+        'not null' => TRUE,
+      ],
+      'target_entity_type' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+      ],
+      'target_entity_id' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+      ],
+      'field_name' => [
+        'type' => 'varchar_ascii',
+        'length' => 128,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'field_delta' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ],
+      'field_property' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => 'value',
+      ],
+      'source_hash' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'provider_translation_hash' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'target_hash_at_import' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'current_target_hash' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'origin' => [
+        'type' => 'varchar_ascii',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'machine_translated|machine_accepted|editor_modified|editor|source_copy',
+      ],
+      'status' => [
+        'type' => 'varchar_ascii',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'machine_translated|approved|needs_review|proposal|rejected|stale|conflict|copied_from_source',
+      ],
+      'provider_name' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'provider_version' => [
+        'type' => 'varchar_ascii',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'last_translated_at' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+      ],
+      'last_reviewed_at' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+      ],
+      'created' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+      'changed' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+    ],
+    'primary key' => ['id'],
+    'unique keys' => [
+      'target_slot' => ['target_entity_type', 'target_entity_id', 'target_langcode', 'field_name', 'field_delta', 'field_property'],
+    ],
+    'indexes' => [
+      'source' => ['source_entity_type', 'source_entity_id', 'source_langcode'],
+      'status' => ['status'],
+    ],
+  ];
+
+  $schema['translation_proposal'] = [
+    'description' => 'A pending machine-translation proposal for a target value slot that already has an editor-approved translation, awaiting Accept/Keep/Edit review.',
+    'fields' => [
+      'id' => [
+        'type' => 'serial',
+        'not null' => TRUE,
+        'description' => 'Primary key.',
+      ],
+      'provenance_id' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'description' => 'References translation_provenance.id.',
+      ],
+      'source_hash' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'current_target_hash' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'provider_translation' => [
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => FALSE,
+        'description' => 'The proposed machine translation text. Nullable so storage can be disabled in privacy-sensitive deployments.',
+      ],
+      'provider_translation_hash' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'status' => [
+        'type' => 'varchar_ascii',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => 'pending',
+        'description' => 'pending|accepted|rejected|edited|superseded',
+      ],
+      'created' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+      'changed' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+      'reviewed_by' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+      ],
+      'reviewed_at' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+      ],
+    ],
+    'primary key' => ['id'],
+    'indexes' => [
+      'provenance_id' => ['provenance_id'],
+      'status' => ['status'],
+    ],
+  ];
+
+  $schema['translation_pending_batch'] = tmgmt_external_translation_pending_batch_schema();
+
+  return $schema;
+}
+
+/**
+ * Schema for translation_pending_batch, factored out so the module-install
+ * hook_schema() and the update hook that creates it for already-installed
+ * sites (see tmgmt_external_translation_update_10001()) share one
+ * definition.
+ */
+function tmgmt_external_translation_pending_batch_schema(): array {
+  return [
+    'description' => 'Tracks one outstanding async translation request submitted to the provider, so a later poll can locate it, apply the existing per-field conflict/write/proposal logic once ready, and resume the caller (job item completion, or Layout Builder inline-block/label completion).',
+    'fields' => [
+      'id' => [
+        'type' => 'serial',
+        'not null' => TRUE,
+        'description' => 'Primary key.',
+      ],
+      'request_id' => [
+        'type' => 'varchar_ascii',
+        'length' => 128,
+        'not null' => TRUE,
+        'description' => 'Opaque id returned by TranslationApiClientInterface::submit().',
+      ],
+      'kind' => [
+        'type' => 'varchar_ascii',
+        'length' => 32,
+        'not null' => TRUE,
+        'description' => 'job_item|layout_inline_blocks',
+      ],
+      'job_id' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+        'description' => 'tmgmt_job id, for kind=job_item only.',
+      ],
+      'job_item_id' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+        'description' => 'tmgmt_job_item id, for kind=job_item only.',
+      ],
+      'host_entity_type' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => FALSE,
+        'description' => 'For kind=layout_inline_blocks: the host entity whose EntityTranslatedEvent triggered this batch.',
+      ],
+      'host_entity_id' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => FALSE,
+      ],
+      'source_langcode' => [
+        'type' => 'varchar_ascii',
+        'length' => 12,
+        'not null' => TRUE,
+      ],
+      'target_langcode' => [
+        'type' => 'varchar_ascii',
+        'length' => 12,
+        'not null' => TRUE,
+      ],
+      'provider_name' => [
+        'type' => 'varchar_ascii',
+        'length' => 64,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'provider_version' => [
+        'type' => 'varchar_ascii',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'context_data' => [
+        'type' => 'blob',
+        'size' => 'big',
+        'not null' => FALSE,
+        'description' => 'JSON-encoded {items, contexts} for kind=job_item, needed to re-run the per-field conflict/write/proposal logic once ready. NULL for kind=layout_inline_blocks, whose block pairs are cheaply re-derivable fresh from the host entity at completion time.',
+      ],
+      'status' => [
+        'type' => 'varchar_ascii',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => 'pending',
+        'description' => 'pending|completed|failed',
+      ],
+      'created' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+      'changed' => [
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+    ],
+    'primary key' => ['id'],
+    'unique keys' => [
+      'request_id' => ['request_id'],
+    ],
+    'indexes' => [
+      'status' => ['status'],
+      'job_item' => ['job_item_id'],
+    ],
+  ];
+}
+
+/**
+ * Creates the translation_pending_batch table for sites where this module
+ * was already installed before Part 4 (async translator support) added it
+ * - hook_schema() alone only runs automatically on a fresh install.
+ */
+function tmgmt_external_translation_update_10001(): void {
+  $schema = \Drupal::database()->schema();
+  if (!$schema->tableExists('translation_pending_batch')) {
+    $schema->createTable('translation_pending_batch', tmgmt_external_translation_pending_batch_schema());
+  }
+}

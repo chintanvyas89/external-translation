@@ -1,0 +1,117 @@
+<?php
+
+/**
+ * @file
+ * Update hooks for the Layout Builder inline-block translation integration.
+ */
+
+use Drupal\Core\Entity\ContentEntityInterface;
+use Drupal\layout_builder\Plugin\SectionStorage\OverridesSectionStorage;
+
+/**
+ * Backfills empty Layout Builder overrides on already-existing translations.
+ *
+ * tmgmt_external_translation_layout_builder_entity_presave() (this module's
+ * own hook, see the .module file) restores a brand-new translation's empty
+ * layout field from its source's current value - but it only fires during
+ * that translation's OWN presave, guarded by isNewTranslation(). It cannot
+ * retroactively fix a translation that already existed before this module
+ * was installed: on a site with existing multilingual content, any
+ * translation added via core's plain "Add translation" form (Layout Builder
+ * never involved) or via layout_builder_at's copy widget with the checkbox
+ * left unchecked (its destructive else-branch, extractFormValues() line
+ * 335, calls $items->setValue(NULL)) has an EMPTY layout_builder__layout
+ * field to this day - not a deliberate editorial choice, just what core and
+ * layout_builder_at always produced before this module's presave hook
+ * existed. Left alone, such a translation's Layout Builder content renders
+ * nothing for that language, indefinitely, until something re-saves it.
+ *
+ * Deliberately does NOT check isNewTranslation() (unlike the live hook):
+ * every translation this update hook can find is by definition already
+ * persisted, so that guard would make this a permanent no-op. There is no
+ * legitimate "editor deliberately wants an empty override" case predating
+ * this module's deployment to protect against - "empty" was always the
+ * unintended default, never a choice, until the day this module went live.
+ * Runs once, against whatever exists at that moment; any empty field an
+ * editor produces afterward (a genuine future decision) is untouched by
+ * this update hook, which only executes this one time.
+ *
+ * Entity-type-agnostic and not hardcoded to nodes: loops every
+ * ContentEntityInterface type that actually has this field in its storage
+ * definitions (i.e. any bundle with Layout Builder overrides enabled,
+ * including nested inline blocks - see LayoutBlockTranslationService's
+ * "Nested Inline Blocks" support - block_content has the same field
+ * whenever layout_builder_at's own forced-translatable hook has touched
+ * it). Skips non-translatable entity types outright since
+ * getTranslationLanguages(FALSE) would be empty for them anyway.
+ *
+ * Batched via $sandbox since a real site's content volume is unbounded.
+ */
+function tmgmt_external_translation_layout_builder_update_10001(array &$sandbox): string {
+  $fieldName = OverridesSectionStorage::FIELD_NAME;
+  $entityTypeManager = \Drupal::entityTypeManager();
+  $entityFieldManager = \Drupal::service('entity_field.manager');
+
+  if (!isset($sandbox['queue'])) {
+    $sandbox['queue'] = [];
+    foreach ($entityTypeManager->getDefinitions() as $entityTypeId => $definition) {
+      if (!$definition->entityClassImplements(ContentEntityInterface::class) || !$definition->isTranslatable()) {
+        continue;
+      }
+      if (!isset($entityFieldManager->getFieldStorageDefinitions($entityTypeId)[$fieldName])) {
+        continue;
+      }
+      $ids = $entityTypeManager->getStorage($entityTypeId)->getQuery()
+        ->accessCheck(FALSE)
+        ->exists($fieldName)
+        ->execute();
+      foreach ($ids as $id) {
+        $sandbox['queue'][] = [$entityTypeId, $id];
+      }
+    }
+    $sandbox['total'] = count($sandbox['queue']);
+    $sandbox['processed'] = 0;
+    $sandbox['fixed'] = 0;
+  }
+
+  $batch = array_splice($sandbox['queue'], 0, 25);
+  foreach ($batch as [$entityTypeId, $id]) {
+    $sandbox['processed']++;
+    $entity = $entityTypeManager->getStorage($entityTypeId)->load($id);
+    if (!$entity instanceof ContentEntityInterface || !$entity->hasField($fieldName)) {
+      continue;
+    }
+    $source = $entity->getUntranslated();
+    if ($source->get($fieldName)->isEmpty()) {
+      continue;
+    }
+    $sourceValue = $source->get($fieldName)->getValue();
+
+    $changed = FALSE;
+    foreach (array_keys($entity->getTranslationLanguages(FALSE)) as $langcode) {
+      $translation = $entity->getTranslation($langcode);
+      if (!$translation->get($fieldName)->isEmpty()) {
+        continue;
+      }
+      $translation->set($fieldName, $sourceValue);
+      $changed = TRUE;
+    }
+    if ($changed) {
+      $entity->save();
+      $sandbox['fixed']++;
+    }
+  }
+
+  $sandbox['#finished'] = $sandbox['total'] > 0 ? min(1, $sandbox['processed'] / $sandbox['total']) : 1;
+
+  if ($sandbox['#finished'] >= 1) {
+    return (string) t('Checked @total existing translation(s); backfilled @fixed with an empty Layout Builder override so they now share their source language\'s current blocks instead of rendering nothing.', [
+      '@total' => $sandbox['total'],
+      '@fixed' => $sandbox['fixed'],
+    ]);
+  }
+  return (string) t('Backfilling Layout Builder overrides: @processed of @total checked so far.', [
+    '@processed' => $sandbox['processed'],
+    '@total' => $sandbox['total'],
+  ]);
+}

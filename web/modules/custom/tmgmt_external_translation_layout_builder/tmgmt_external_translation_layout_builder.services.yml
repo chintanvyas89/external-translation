@@ -1,0 +1,54 @@
+services:
+  tmgmt_external_translation_layout_builder.entity_collector:
+    class: Drupal\tmgmt_external_translation_layout_builder\Layout\LayoutEntityCollector
+    arguments: ['@entity_type.manager', '@inline_block.usage', '@tmgmt_external_translation.moderation_gate']
+
+  tmgmt_external_translation_layout_builder.block_mapper:
+    class: Drupal\tmgmt_external_translation_layout_builder\Layout\LayoutBlockMapper
+    arguments: ['@tmgmt_external_translation_layout_builder.entity_collector']
+
+  tmgmt_external_translation_layout_builder.translation_service:
+    class: Drupal\tmgmt_external_translation_layout_builder\Layout\LayoutBlockTranslationService
+    arguments:
+      - '@tmgmt_external_translation_layout_builder.entity_collector'
+      - '@tmgmt_external_translation_layout_builder.block_mapper'
+      - '@entity_type.manager'
+      - '@tmgmt_external_translation.translation_api_client'
+      - '@tmgmt_external_translation.conflict_detector'
+      - '@tmgmt_external_translation.provenance_manager'
+      - '@tmgmt_external_translation.proposal_manager'
+      - '@tmgmt_external_translation.field_value_reader'
+      - '@database'
+      - '@datetime.time'
+      - '@tmgmt_external_translation.hash_manager'
+      - '@content_translation.manager'
+      - '@tmgmt_external_translation.entity_writer'
+      - '@state'
+
+  tmgmt_external_translation_layout_builder.translate_inline_blocks_subscriber:
+    class: Drupal\tmgmt_external_translation_layout_builder\EventSubscriber\TranslateInlineBlocksSubscriber
+    arguments: ['@tmgmt_external_translation_layout_builder.translation_service', '@logger.factory']
+    tags:
+      - { name: event_subscriber }
+
+  tmgmt_external_translation_layout_builder.complete_inline_blocks_subscriber:
+    class: Drupal\tmgmt_external_translation_layout_builder\EventSubscriber\CompleteInlineBlocksSubscriber
+    arguments: ['@tmgmt_external_translation_layout_builder.translation_service', '@logger.factory']
+    tags:
+      - { name: event_subscriber }
+
+  tmgmt_external_translation_layout_builder.repoint_block_revision_subscriber:
+    class: Drupal\tmgmt_external_translation_layout_builder\EventSubscriber\RepointBlockRevisionSubscriber
+    arguments: ['@entity_type.manager', '@tmgmt_external_translation_layout_builder.entity_collector']
+    tags:
+      - { name: event_subscriber }
+
+  tmgmt_external_translation_layout_builder.label_proposal_handler:
+    class: Drupal\tmgmt_external_translation_layout_builder\Layout\LayoutLabelProposalHandler
+    arguments: ['@tmgmt_external_translation.proposal_manager', '@tmgmt_external_translation.provenance_manager', '@tmgmt_external_translation_layout_builder.entity_collector']
+
+  tmgmt_external_translation_layout_builder.label_proposal_action_subscriber:
+    class: Drupal\tmgmt_external_translation_layout_builder\EventSubscriber\LayoutLabelProposalActionSubscriber
+    arguments: ['@tmgmt_external_translation_layout_builder.label_proposal_handler']
+    tags:
+      - { name: event_subscriber }

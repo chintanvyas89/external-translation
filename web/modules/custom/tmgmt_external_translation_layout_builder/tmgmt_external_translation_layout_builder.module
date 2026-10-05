@@ -1,0 +1,201 @@
+<?php
+
+/**
+ * @file
+ * Hooks for the Layout Builder inline-block translation integration.
+ */
+
+use Drupal\block_content\BlockContentInterface;
+use Drupal\Core\Entity\ContentEntityInterface;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\Core\Language\LanguageInterface;
+use Drupal\layout_builder\Plugin\SectionStorage\OverridesSectionStorage;
+
+/**
+ * Implements hook_ENTITY_TYPE_update() for block_content.
+ *
+ * Detects when an inline block used as a Layout Builder component's
+ * source has its own content edited, and automatically re-requests
+ * translation for any already-translated counterpart whose source has
+ * gone stale - see LayoutBlockTranslationService::checkSourceBlockForStaleness().
+ *
+ * Kept as a defensive secondary trigger (e.g. a script or future caller
+ * that saves a block directly without saving the host in the same
+ * request), but this can no longer catch a genuine, real editorial edit
+ * made through Layout Builder's own UI - see
+ * tmgmt_external_translation_layout_builder_entity_update() below for why,
+ * and for the actual reliable trigger.
+ */
+function tmgmt_external_translation_layout_builder_block_content_update(BlockContentInterface $block): void {
+  if (!\Drupal::hasService('inline_block.usage')) {
+    return;
+  }
+  \Drupal::service('tmgmt_external_translation_layout_builder.translation_service')
+    ->checkSourceBlockForStaleness((string) $block->id(), (string) $block->getRevisionId());
+}
+
+/**
+ * Implements hook_entity_update().
+ *
+ * The real, reliable staleness trigger for a genuine hand-edit made
+ * through Layout Builder's own UI. hook_block_content_update() above
+ * cannot catch this case: core's InlineBlockEntityOperations::handlePreSave()
+ * (a hook_entity_presave() on the HOST entity) saves the edited block -
+ * firing hook_block_content_update() - BEFORE it updates the host's own
+ * in-memory component configuration, and before the host itself has been
+ * written to the database at all. So checkSourceBlockForStaleness()'s own
+ * findComponentForBlock() lookup (a fresh DB load) always sees the STALE,
+ * pre-edit component pointer at that point, and its revision-guard
+ * (correctly, by design) rejects the check as "not really a source
+ * change yet." Confirmed empirically: a direct EN edit through Layout
+ * Builder's UI never marks the FR counterpart stale via the block hook
+ * alone - this isn't the "narrow, cosmetic, eventually-consistent" edge
+ * case an earlier version of this code assumed, it's the standard path
+ * for every real edit.
+ *
+ * hook_entity_update() on the HOST fires only after the host's own save
+ * (with the corrected component pointer) has actually committed - so a
+ * fresh load at this point sees the true, current state, and the
+ * revision-guard passes correctly.
+ *
+ * Only proceeds for a save of the entity's own SOURCE/default-language
+ * translation - critically, NOT for a save of some other translation,
+ * which is how our OWN machine-translation writes to the target side
+ * persist (LayoutEntityCollector::repointComponent()/setComponentLabel()
+ * call $targetHostTranslation->save()). Without this guard, our own
+ * write would immediately re-trigger this hook and misread itself as a
+ * new source change - the exact cascade bug checkSourceBlockForStaleness()'s
+ * revision-guard was originally built to prevent, just at a different
+ * layer.
+ */
+function tmgmt_external_translation_layout_builder_entity_update(EntityInterface $entity): void {
+  if (!$entity instanceof ContentEntityInterface) {
+    return;
+  }
+  if ($entity->language()->getId() !== $entity->getUntranslated()->language()->getId()) {
+    return;
+  }
+  /** @var \Drupal\tmgmt_external_translation_layout_builder\Layout\LayoutEntityCollector $collector */
+  $collector = \Drupal::service('tmgmt_external_translation_layout_builder.entity_collector');
+  if (!$collector->hasLayout($entity)) {
+    return;
+  }
+  $service = \Drupal::service('tmgmt_external_translation_layout_builder.translation_service');
+  foreach ($collector->collectInlineBlocks($entity) as $reference) {
+    $service->checkSourceBlockForStaleness((string) $reference->block->id(), (string) $reference->block->getRevisionId());
+  }
+}
+
+/**
+ * Implements hook_entity_presave().
+ *
+ * A brand-new translation's layout field is EMPTY by default, regardless
+ * of layout_builder_at's "Copy blocks into translation" checkbox -
+ * verified empirically (not merely read from source): core's own generic
+ * translation pre-fill (ContentTranslationController::prepareTranslation()'s
+ * `$entity->addTranslation($target, $source_translation->toArray())`) does
+ * NOT actually populate `layout_builder__layout` on the new translation,
+ * even though the field is translatable and the array passed contains it -
+ * confirmed via `ddev drush php:eval` that the field remains empty
+ * immediately after addTranslation() regardless of the values array,
+ * though the SAME field CAN be set correctly via a plain ->set() call once
+ * the translation object already exists (a quirk of how
+ * ContentEntityStorageBase::initFieldValues()'s in-progress magic-property
+ * assignment interacts with this field type - not fully root-caused, but
+ * reliably reproducible). layout_builder_at's own widget doesn't rely on
+ * this pre-fill either: its checked (duplicate) path reads straight from
+ * `$entity->getUntranslated()`, and its unchecked path explicitly clears
+ * the (already-empty) field - so in EITHER case, without this hook, a new
+ * translation's layout ends up empty, not shared.
+ *
+ * This hook is what actually makes "shared by default" (plan Part 5) real:
+ * for any newly-created, non-default translation whose layout field is
+ * still empty by the time it's saved, populate it from the source
+ * translation's CURRENT value - giving FR the same block/section
+ * references as EN. If the widget's checked path already populated it
+ * (opt-in full duplication, still available per plan decision), the field
+ * is non-empty and this is a no-op, leaving that path untouched.
+ *
+ * hook_entity_presave() receives $entity in whatever translation context
+ * was active when ->save() was called (typically the entity's default
+ * translation, since callers usually call $node->save() rather than
+ * $node->getTranslation('fr')->save()) - NOT necessarily the specific new
+ * translation being added. So this checks every translation on the entity
+ * rather than trusting $entity's own active langcode.
+ */
+function tmgmt_external_translation_layout_builder_entity_presave(EntityInterface $entity): void {
+  if (!$entity instanceof ContentEntityInterface) {
+    return;
+  }
+  $fieldName = OverridesSectionStorage::FIELD_NAME;
+  if (!$entity->hasField($fieldName)) {
+    return;
+  }
+  $source = $entity->getUntranslated();
+  if ($source->get($fieldName)->isEmpty()) {
+    return;
+  }
+  $sourceValue = $source->get($fieldName)->getValue();
+
+  foreach ($entity->getTranslationLanguages(FALSE) as $langcode => $language) {
+    $translation = $entity->getTranslation($langcode);
+    if (!$translation->isNewTranslation()) {
+      continue;
+    }
+    if (!$translation->get($fieldName)->isEmpty()) {
+      continue;
+    }
+    $translation->set($fieldName, $sourceValue);
+  }
+}
+
+/**
+ * Implements hook_entity_prepare_view().
+ *
+ * Block-content entities keep a fixed 'en' langcode forever by design
+ * (see LayoutBlockTranslationService's own class docblock) - a
+ * "translated" block's content lives in a different REVISION of the
+ * SAME entity, resolved by whichever revision the host page's own
+ * Layout Builder component config points at, never by a genuine Drupal
+ * translation of the block itself.
+ *
+ * But core's Drupal\Core\Entity\Entity\EntityViewDisplay::buildMultiple()
+ * always passes $entity->language()->getId() as the langcode handed to
+ * EVERY field formatter whenever the entity's bundle has
+ * content_translation enabled - which block_content:basic does on this
+ * site, required by layout_builder_at's own "Copy blocks into
+ * translation" feature, unrelated to and independent of this module's
+ * own design. That means ANY formatter on ANY field of a block that
+ * itself resolves translated content by langcode (core's built-in
+ * "Rendered entity" formatter, or any third-party one) would always
+ * resolve using the block's fixed 'en', ignoring the language of the
+ * page actually being viewed. Confirmed empirically: a Media item
+ * referenced from a block, translated via this module's own
+ * referenced-entity support, rendered in English even on a French page
+ * until this was found.
+ *
+ * A per-formatter fix (subclassing one specific formatter) doesn't
+ * scale - a real project can have many different formatters across many
+ * different field types on a block, and every one of them would need
+ * its own override. Fixing it here instead, at the single generic point
+ * core itself uses to decide the langcode in the first place, covers
+ * every field and every formatter uniformly with no per-formatter code.
+ *
+ * Only mutates the IN-MEMORY copy about to be rendered for this one
+ * request - never saved, so this has no effect on the entity's actual
+ * stored langcode or on any other part of this system (staleness
+ * detection, provenance, translation writes) that legitimately depends
+ * on a block always reporting 'en'; those all operate on freshly loaded
+ * entities from storage, not the object rendered here.
+ */
+function tmgmt_external_translation_layout_builder_entity_prepare_view(string $entity_type_id, array $entities, array $displays, $view_mode): void {
+  if ($entity_type_id !== 'block_content') {
+    return;
+  }
+  $currentLangcode = \Drupal::languageManager()->getCurrentLanguage(LanguageInterface::TYPE_CONTENT)->getId();
+  foreach ($entities as $entity) {
+    if ($entity->language()->getId() !== $currentLangcode) {
+      $entity->set('langcode', $currentLangcode);
+    }
+  }
+}

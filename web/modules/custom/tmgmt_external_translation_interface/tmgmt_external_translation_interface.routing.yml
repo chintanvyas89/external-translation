@@ -1,0 +1,15 @@
+tmgmt_external_translation_interface.request:
+  path: '/admin/config/regional/translate/request-machine-translation'
+  defaults:
+    _form: '\Drupal\tmgmt_external_translation_interface\Form\RequestInterfaceTranslationForm'
+    _title: 'Request interface machine translation'
+  requirements:
+    _permission: 'manage translation providers'
+
+tmgmt_external_translation_interface.proposal_review:
+  path: '/admin/config/regional/translate/proposals/{langcode}'
+  defaults:
+    _form: '\Drupal\tmgmt_external_translation_interface\Form\InterfaceProposalReviewForm'
+    _title: 'Interface translation proposals'
+  requirements:
+    _permission: 'accept translation proposals+reject translation proposals'

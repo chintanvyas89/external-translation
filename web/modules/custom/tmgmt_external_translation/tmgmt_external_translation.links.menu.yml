@@ -1,0 +1,6 @@
+tmgmt_external_translation.proposal_dashboard:
+  title: 'Translation proposals'
+  description: 'Review pending machine-translation proposals across content, interface strings, and Layout Builder blocks.'
+  route_name: tmgmt_external_translation.proposal_dashboard
+  parent: system.admin_content
+  weight: 20

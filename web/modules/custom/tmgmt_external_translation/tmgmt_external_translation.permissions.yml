@@ -1,0 +1,16 @@
+accept translation proposals:
+  title: 'Accept machine translation proposals'
+  description: 'Accept or edit a pending machine translation proposal, writing it into the live translation.'
+
+reject translation proposals:
+  title: 'Keep existing translations over machine translation proposals'
+  description: 'Reject a pending machine translation proposal, leaving the existing editor translation untouched.'
+
+view translation audit:
+  title: 'View translation provenance and proposal history'
+  description: 'View the origin, status and history of machine vs. editor translations.'
+
+manage translation providers:
+  title: 'Request machine translation'
+  description: 'Trigger machine translation requests (content or interface strings).'
+  restrict access: true

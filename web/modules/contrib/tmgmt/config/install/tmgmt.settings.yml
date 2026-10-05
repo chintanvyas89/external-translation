@@ -1,0 +1,14 @@
+quick_checkout: true
+anonymous_access: true
+purge_continuous: _never
+purge_continuous_aborted: false
+purge_finished: _never
+word_count_exclude_tags: true
+source_list_limit: 20
+respect_text_format: true
+field_length_overflow_policy: needs_review
+submit_job_item_on_cron: false
+job_items_cron_limit: 50
+allowed_formats: {}
+file_mimetypes: {}
+purge_stale: true

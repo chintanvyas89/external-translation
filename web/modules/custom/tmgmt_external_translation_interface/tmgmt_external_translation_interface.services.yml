@@ -1,0 +1,16 @@
+services:
+  tmgmt_external_translation_interface.manager:
+    class: Drupal\tmgmt_external_translation_interface\InterfaceTranslation\InterfaceTranslationManager
+    arguments:
+      - '@locale.storage'
+      - '@database'
+      - '@tmgmt_external_translation.translation_api_client'
+      - '@tmgmt_external_translation.hash_manager'
+      - '@tmgmt_external_translation.provenance_manager'
+      - '@tmgmt_external_translation.proposal_manager'
+
+  tmgmt_external_translation_interface.proposal_action_subscriber:
+    class: Drupal\tmgmt_external_translation_interface\EventSubscriber\InterfaceStringProposalActionSubscriber
+    arguments: ['@tmgmt_external_translation_interface.manager']
+    tags:
+      - { name: event_subscriber }

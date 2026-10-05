@@ -1,0 +1,11 @@
+name: 'TMGMT External Translation: Layout Builder'
+type: module
+description: 'Extends the external translation engine to cover Layout Builder inline blocks, working with Layout Builder Asymmetric Translation (layout_builder_at).'
+package: Translation
+core_version_requirement: ^10 || ^11
+dependencies:
+  - drupal:layout_builder
+  - layout_builder_at:layout_builder_at
+  - tmgmt:tmgmt
+  - tmgmt:tmgmt_content
+  - tmgmt_external_translation:tmgmt_external_translation
